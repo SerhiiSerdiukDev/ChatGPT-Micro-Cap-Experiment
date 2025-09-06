@@ -236,7 +236,7 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols]
 
 
-def _yahoo_download(ticker: str, **kwargs: Any) -> pd.DataFrame:
+def _yahoo_download(ticker: str, **kwargs: dict[str, Any]) -> pd.DataFrame:
     """Call yfinance.download with a real UA and silence all chatter."""
     import io, logging, requests
     from contextlib import redirect_stderr, redirect_stdout
@@ -356,7 +356,7 @@ def _weekend_safe_range(
     return start_ts, end_ts
 
 
-def download_price_data(ticker: str, **kwargs: Any) -> FetchResult:
+def download_price_data(ticker: str, **kwargs: dict[str, Any]) -> FetchResult:
     """
     Robust OHLCV fetch with multi-stage fallbacks:
 
@@ -725,6 +725,16 @@ Would you like to log a manual trade? Enter 'b' for buy, 's' for sell, or press 
 # ------------------------------
 
 
+def _append_to_trade_log(log_entry: dict[str, Any]) -> None:
+    """Append a single trade record to the trade log CSV."""
+    log_df = pd.DataFrame([log_entry])
+    if TRADE_LOG_CSV.exists():
+        existing_log = pd.read_csv(TRADE_LOG_CSV)
+        if not existing_log.empty:
+            log_df = pd.concat([existing_log, log_df], ignore_index=True)
+    log_df.to_csv(TRADE_LOG_CSV, index=False)
+
+
 def log_sell(
     ticker: str,
     shares: float,
@@ -744,17 +754,8 @@ def log_sell(
         "Reason": "AUTOMATED SELL - STOPLOSS TRIGGERED",
     }
     print(f"{ticker} stop loss was met. Selling all shares.")
+    _append_to_trade_log(log)
     portfolio = portfolio[portfolio["ticker"] != ticker]
-
-    if TRADE_LOG_CSV.exists():
-        df = pd.read_csv(TRADE_LOG_CSV)
-        if df.empty:
-            df = pd.DataFrame([log])
-        else:
-            df = pd.concat([df, pd.DataFrame([log])], ignore_index=True)
-    else:
-        df = pd.DataFrame([log])
-    df.to_csv(TRADE_LOG_CSV, index=False)
     return portfolio
 
 
@@ -778,7 +779,7 @@ def log_manual_buy(
             print("Returning...")
             return cash, chatgpt_portfolio
 
-    if not isinstance(chatgpt_portfolio, pd.DataFrame) or chatgpt_portfolio.empty:
+    if chatgpt_portfolio.empty:
         chatgpt_portfolio = pd.DataFrame(
             columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
         )
@@ -826,15 +827,7 @@ def log_manual_buy(
         "PnL": 0.0,
         "Reason": "MANUAL BUY LIMIT - Filled",
     }
-    if os.path.exists(TRADE_LOG_CSV):
-        df = pd.read_csv(TRADE_LOG_CSV)
-        if df.empty:
-            df = pd.DataFrame([log])
-        else:
-            df = pd.concat([df, pd.DataFrame([log])], ignore_index=True)
-    else:
-        df = pd.DataFrame([log])
-    df.to_csv(TRADE_LOG_CSV, index=False)
+    _append_to_trade_log(log)
 
     rows = chatgpt_portfolio.loc[
         chatgpt_portfolio["ticker"].str.upper() == ticker.upper()
@@ -965,15 +958,7 @@ If this is a mistake, enter 1. """
         "Shares Sold": shares_sold,
         "Sell Price": exec_price,
     }
-    if os.path.exists(TRADE_LOG_CSV):
-        df = pd.read_csv(TRADE_LOG_CSV)
-        if df.empty:
-            df = pd.DataFrame([log])
-        else:
-            df = pd.concat([df, pd.DataFrame([log])], ignore_index=True)
-    else:
-        df = pd.DataFrame([log])
-    df.to_csv(TRADE_LOG_CSV, index=False)
+    _append_to_trade_log(log)
 
     if total_shares == shares_sold:
         chatgpt_portfolio = chatgpt_portfolio[chatgpt_portfolio["ticker"] != ticker]
@@ -999,7 +984,7 @@ If this is a mistake, enter 1. """
 
 def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     """Print daily price updates and performance metrics (incl. CAPM)."""
-    portfolio_dict: list[dict[Any, Any]] = chatgpt_portfolio.to_dict(orient="records")
+    portfolio_dict: list[dict[str, Any]] = chatgpt_portfolio.to_dict(orient="records")
     today = check_weekend()
 
     rows: list[list[str]] = []
@@ -1036,9 +1021,10 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
                 [ticker, f"{price:,.2f}", f"{percent_change:+.2f}%", f"{int(volume):,}"]
             )
         except Exception as e:
-            raise Exception(
-                f"Download for {ticker} failed. {e} Try checking internet connection."
+            logger.warning(
+                "Could not fetch or process data for %s. Error: %s", ticker, e
             )
+            rows.append([ticker, "ERROR", "—", "—"])
 
     # Read portfolio history
     try:
@@ -1084,6 +1070,11 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     drawdowns = (equity_series / running_max) - 1.0
     max_drawdown = float(drawdowns.min())  # most negative value
     mdd_date = drawdowns.idxmin()
+    mdd_date_str = (
+        mdd_date.strftime("%Y-%m-%d")
+        if hasattr(mdd_date, "strftime")
+        else str(mdd_date)
+    )
 
     # Daily simple returns (portfolio)
     r = equity_series.pct_change().dropna()
@@ -1214,14 +1205,14 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         initial_price = float(spx_norm["Close"].iloc[0])
         price_now = float(spx_norm["Close"].iloc[-1])
         try:
-            starting_equity = float(input("what was your starting equity? "))
-        except Exception:
-            print("Invalid input for starting equity. Defaulting to NaN.")
-        spx_value = (
-            (starting_equity / initial_price) * price_now
-            if not np.isnan(starting_equity)
-            else np.nan
-        )
+            raw_input = input("what was your starting equity? ")
+            starting_equity = float(raw_input)
+        except (ValueError, TypeError):
+            print("Invalid input for starting equity. Skipping S&P 500 comparison.")
+            starting_equity = np.nan
+
+        if not np.isnan(starting_equity):
+            spx_value = (starting_equity / initial_price) * price_now
 
     # -------- Pretty Printing --------
     print("\n" + "=" * 64)
@@ -1249,12 +1240,6 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
         )
 
     print("\n[ Risk & Return ]")
-    if hasattr(mdd_date, "date") and not isinstance(mdd_date, (str, int)):
-        mdd_date_str = mdd_date.date()
-    elif hasattr(mdd_date, "strftime") and not isinstance(mdd_date, (str, int)):
-        mdd_date_str = mdd_date.strftime("%Y-%m-%d")
-    else:
-        mdd_date_str = str(mdd_date)
     print(
         f"{'Max Drawdown:':32} {fmt_or_na(max_drawdown, '{:.2%}'):>15}   on {mdd_date_str}"
     )
@@ -1278,12 +1263,9 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
     print("\n[ Snapshot ]")
     print(f"{'Latest ChatGPT Equity:':32} ${final_equity:>14,.2f}")
     if not np.isnan(spx_value):
-        try:
-            print(
-                f"{f'${starting_equity} in S&P 500 (same window):':32} ${spx_value:>14,.2f}"
-            )
-        except Exception:
-            pass
+        print(
+            f"{f'${starting_equity:,.2f} in S&P 500 (same window):':32} ${spx_value:>14,.2f}"
+        )
     print(f"{'Cash Balance:':32} ${cash:>14,.2f}")
 
     print("\n[ Holdings ]")
