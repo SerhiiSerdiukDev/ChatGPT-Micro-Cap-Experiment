@@ -14,8 +14,10 @@ This test suite covers:
 
 import json
 import os
+import sys
 import tempfile
 import unittest
+import importlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch, mock_open
@@ -261,10 +263,12 @@ class TestDataAccess(unittest.TestCase):
         expected_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
         self.assertListEqual(list(result.columns), expected_cols)
         # Adj Close should equal Close when missing
-        pd.testing.assert_series_equal(result["Adj Close"], result["Close"])
+        pd.testing.assert_series_equal(
+            result["Adj Close"], result["Close"], check_names=False
+        )
 
     @patch("trading_script.yf.download")
-    @patch("trading_script.requests.Session")
+    @patch("requests.Session")
     def test_yahoo_download_success(self, mock_session, mock_download):
         """Test successful Yahoo download."""
         mock_df = pd.DataFrame(
@@ -290,7 +294,7 @@ class TestDataAccess(unittest.TestCase):
         result = ts._yahoo_download("AAPL")
         self.assertTrue(result.empty)
 
-    @patch("trading_script.requests.get")
+    @patch("requests.get")
     def test_stooq_csv_download_success(self, mock_get):
         """Test successful Stooq CSV download."""
         csv_data = "Date,Open,High,Low,Close,Volume\n2024-01-01,100,102,99,101,1000\n"
@@ -306,7 +310,7 @@ class TestDataAccess(unittest.TestCase):
         self.assertFalse(result.empty)
         self.assertIn("Adj Close", result.columns)
 
-    @patch("trading_script.requests.get")
+    @patch("requests.get")
     def test_stooq_csv_download_failure(self, mock_get):
         """Test Stooq CSV download failure."""
         mock_response = Mock()
@@ -341,8 +345,21 @@ class TestDataAccess(unittest.TestCase):
             index=pd.DatetimeIndex(["2024-01-01"]),
         )
 
-        with patch("pandas_datareader.data.DataReader") as mock_reader:
-            mock_reader.return_value = mock_df
+        # Mock the import and DataReader
+        mock_pdr = Mock()
+        mock_pdr.DataReader.return_value = mock_df
+
+        # Set up the module hierarchy correctly
+        pandas_datareader_mock = Mock()
+        pandas_datareader_mock.data = mock_pdr
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "pandas_datareader": pandas_datareader_mock,
+                "pandas_datareader.data": mock_pdr,
+            },
+        ):
             start = datetime(2024, 1, 1)
             end = datetime(2024, 1, 2)
             result = ts._stooq_download("AAPL", start, end)
@@ -969,12 +986,40 @@ class TestReportingMetrics(unittest.TestCase):
                 "Adj Close": [100.5, 102.5],
                 "Volume": [1000, 1100],
             },
-            index=pd.DatetimeIndex(["2024-01-14", "2024-01-15"]),
+            index=pd.DatetimeIndex(["2024-01-14", "2024-01-15"], name="Date"),
         )
         mock_dpd.return_value = ts.FetchResult(mock_data, "yahoo")
 
         # Create portfolio history
         portfolio_data = [
+            {
+                "Date": "2024-01-13",
+                "Ticker": "AAPL",
+                "Shares": 100,
+                "Buy Price": 95,
+                "Cost Basis": 9500,
+                "Stop Loss": 90,
+                "Current Price": 99,
+                "Total Value": 9900,
+                "PnL": 400,
+                "Action": "HOLD",
+                "Cash Balance": "",
+                "Total Equity": "",
+            },
+            {
+                "Date": "2024-01-13",
+                "Ticker": "TOTAL",
+                "Shares": "",
+                "Buy Price": "",
+                "Cost Basis": "",
+                "Stop Loss": "",
+                "Current Price": "",
+                "Total Value": 9900,
+                "PnL": 400,
+                "Action": "",
+                "Cash Balance": 1000,
+                "Total Equity": 10900,
+            },
             {
                 "Date": "2024-01-14",
                 "Ticker": "AAPL",
@@ -1153,6 +1198,34 @@ class TestLoadLatestPortfolioState(unittest.TestCase):
                 "Action": "",
                 "Cash Balance": 2000,
                 "Total Equity": 22500,
+            },
+            {
+                "Date": "2024-01-15",
+                "Ticker": "AAPL",
+                "Shares": 100,
+                "Buy Price": 95,
+                "Cost Basis": 9500,
+                "Stop Loss": 90,
+                "Current Price": 102,
+                "Total Value": 10200,
+                "PnL": 700,
+                "Action": "HOLD",
+                "Cash Balance": "",
+                "Total Equity": "",
+            },
+            {
+                "Date": "2024-01-15",
+                "Ticker": "MSFT",
+                "Shares": 50,
+                "Buy Price": 200,
+                "Cost Basis": 10000,
+                "Stop Loss": 180,
+                "Current Price": 205,
+                "Total Value": 10250,
+                "PnL": 250,
+                "Action": "HOLD",
+                "Cash Balance": "",
+                "Total Equity": "",
             },
             {
                 "Date": "2024-01-15",
@@ -1342,7 +1415,7 @@ class TestEdgeCasesAndErrorHandling(unittest.TestCase):
 
     def test_network_timeout_handling(self):
         """Test handling of network timeouts."""
-        with patch("trading_script.requests.get") as mock_get:
+        with patch("requests.get") as mock_get:
             mock_get.side_effect = Exception("Timeout")
 
             start = pd.Timestamp("2024-01-01")
@@ -1353,7 +1426,7 @@ class TestEdgeCasesAndErrorHandling(unittest.TestCase):
 
     def test_malformed_csv_data(self):
         """Test handling of malformed CSV data from Stooq."""
-        with patch("trading_script.requests.get") as mock_get:
+        with patch("requests.get") as mock_get:
             mock_response = Mock()
             mock_response.status_code = 200
             mock_response.text = "invalid,csv,data\n"

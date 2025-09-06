@@ -794,7 +794,7 @@ def log_manual_buy(
         )
         return cash, chatgpt_portfolio
 
-    o = float(data.get("Open", [np.nan])[-1])
+    o = float(data.get("Open", pd.Series([np.nan])).iloc[-1])
     h = float(data["High"].iloc[-1])
     l = float(data["Low"].iloc[-1])
     if np.isnan(o):
@@ -1041,10 +1041,17 @@ def daily_results(chatgpt_portfolio: pd.DataFrame, cash: float) -> None:
             )
 
     # Read portfolio history
-    chatgpt_df = pd.read_csv(PORTFOLIO_CSV)
+    try:
+        chatgpt_df = pd.read_csv(PORTFOLIO_CSV)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        chatgpt_df = pd.DataFrame()
 
     # Use only TOTAL rows, sorted by date
-    totals = chatgpt_df[chatgpt_df["Ticker"] == "TOTAL"].copy()
+    totals = (
+        chatgpt_df[chatgpt_df["Ticker"] == "TOTAL"].copy()
+        if not chatgpt_df.empty
+        else pd.DataFrame()
+    )
     if totals.empty:
         print("\n" + "=" * 64)
         print(f"Daily Results — {today}")
@@ -1302,7 +1309,11 @@ def load_latest_portfolio_state(
     file: str,
 ) -> tuple[pd.DataFrame | list[dict[str, Any]], float]:
     """Load the most recent portfolio snapshot and cash balance."""
-    df = pd.read_csv(file)
+    try:
+        df = pd.read_csv(file)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        df = pd.DataFrame()
+
     if df.empty:
         portfolio = pd.DataFrame(
             columns=["ticker", "shares", "stop_loss", "buy_price", "cost_basis"]
